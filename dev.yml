@@ -15,3 +15,6 @@ commands:
       else
         bundle exec ruby -Itest "$@"
       fi
+
+packages:
+  - git@github.com:Shopify/dev-shopify.git
