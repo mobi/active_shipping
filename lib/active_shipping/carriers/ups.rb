@@ -201,6 +201,19 @@ module ActiveShipping
       end
     end
 
+    def get_cached_bearer_token(test)
+      token = Rails.cache.read("ups-bearer-token") if !test
+      if token.nil?
+        token = get_bearer_token(test)
+        cache_ups_bearer_token(token) if token && !test
+      end
+      token
+    end
+
+    def cache_ups_bearer_token(token)
+      Rails.cache.write("ups-bearer-token", token, expires_in: 3.hours)
+    end
+
     def create_shipment(origin, destination, packages, options = {})
       options = @options.merge(options)
       packages = Array(packages)
@@ -1166,7 +1179,7 @@ module ActiveShipping
 
     def track_commit(action, request, test = false)
       headers = {}
-      headers['Authorization'] = "Bearer #{get_bearer_token(test)}"
+      headers['Authorization'] = "Bearer #{get_cached_bearer_token(test)}"
       response = ssl_post("#{test ? TEST_URL : LIVE_URL}/#{RESOURCES[action]}", request, headers)
       response.encode('utf-8', 'iso-8859-1')
     end
