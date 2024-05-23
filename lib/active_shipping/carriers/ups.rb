@@ -181,7 +181,6 @@ module ActiveShipping
 
     def get_bearer_token(test = false)
       combined_user_and_password = "#{@options[:client_id]}:#{@options[:client_secret]}"
-      #uri = URI.parse('https://onlinetools.ups.com/security/v1/oauth/token')
       uri = URI.parse("#{test ? TEST_URL : LIVE_URL}/#{'security/v1/oauth/token'}")
       http = Net::HTTP.new(uri.host, uri.port)
       http.use_ssl = true
@@ -197,7 +196,8 @@ module ActiveShipping
         response_data = JSON.parse(response.body)
         response_data['access_token']
       else
-        "cURL Error #: #{response.code}"
+        error = "UPS Bearer token API response Error code #: #{response.code}"
+        Rails.logger.error(error)
       end
     end
 
