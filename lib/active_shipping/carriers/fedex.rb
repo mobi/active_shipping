@@ -156,7 +156,7 @@ module ActiveShipping
     end
 
     def requirements
-      [:key, :password, :account, :login]
+      [:client_id, :client_secret]
     end
 
     def find_rates(origin, destination, packages, options = {})
@@ -790,15 +790,15 @@ module ActiveShipping
 
     def parse_json_tracking_response(response, options)
       parsed_response = JSON.parse(response)
+      all_tracking_details = parsed_response.dig("output", "completeTrackResults")[0]
 
-      success = true
+      success = true if all_tracking_details.present?
       message = ''
 
       if success
         delivery_signature = nil
         shipment_events = []
 
-        all_tracking_details = parsed_response.dig("output", "completeTrackResults")[0]
         if all_tracking_details.dig("trackResults")[0].dig("error") != nil
           message = all_tracking_details.dig("trackResults")[0].dig("error", "message")
           return TrackingResponse.new(
