@@ -172,12 +172,12 @@ module ActiveShipping
 
     def find_tracking_info(tracking_number, options = {})
       options = @options.merge(options)
-
+      test = options[:mode] == "development"
       # tracking_request = build_tracking_request(tracking_number, options)
-      body, headers = build_json_tracking_request(tracking_number, options)
+      body, headers = build_json_tracking_request(tracking_number, options, test)
       # xml = commit(save_request(tracking_request), (options[:test] || false))
       track_url = "/track/v1/trackingnumbers"
-      track_response = track_commit(body, headers, track_url, (options[:test] || false))
+      track_response = track_commit(body, headers, track_url, (test || false))
       # parse_tracking_response(xml, options)
       parse_json_tracking_response(track_response, options)
     end
@@ -448,11 +448,11 @@ module ActiveShipping
       xml_builder.to_xml
     end
 
-    def build_json_tracking_request(tracking_number, options = {})
+    def build_json_tracking_request(tracking_number, options = {}, test)
       headers = {}
       headers['X-locale'] = 'en_US'
       headers['Content-Type'] = 'application/json'
-      headers['authorization'] = "bearer #{get_cached_bearer_token(options)}"
+      headers['authorization'] = "bearer #{get_cached_bearer_token(options, test)}"
       body = JSON.dump(build_tracking_request_body(tracking_number, options))
       return body, headers
     end
@@ -475,9 +475,9 @@ module ActiveShipping
       return body
     end
 
-    def get_bearer_token(options = {})
+    def get_bearer_token(options, test)
       begin
-        api_url = options[:test] ? TEST_URL : LIVE_URL
+        api_url = test ? TEST_URL : LIVE_URL
         response = HTTParty.post("#{api_url}/#{'oauth/token'}", body: token_body(options))
         case response.code
         when 200
@@ -490,11 +490,11 @@ module ActiveShipping
       end
     end
 
-    def get_cached_bearer_token(options)
-      token = Rails.cache.read("fedex-bearer-token")
+    def get_cached_bearer_token(options, test)
+      token = Rails.cache.read("fedex-bearer-token") if !test
       if token.nil?
-        token = get_bearer_token(options)
-        create_bearer_token_cached(token) if token
+        token = get_bearer_token(options, test)
+        create_bearer_token_cached(token) if token && !test
       end
       token
     end
