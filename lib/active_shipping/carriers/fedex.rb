@@ -179,7 +179,7 @@ module ActiveShipping
       track_url = "/track/v1/trackingnumbers"
       track_response = track_commit(body, headers, track_url, (test || false))
       # parse_tracking_response(xml, options)
-      parse_json_tracking_response(track_response, options)
+      parse_json_tracking_response(track_response, options, body)
     end
 
 
@@ -788,7 +788,7 @@ module ActiveShipping
       )
     end
 
-    def parse_json_tracking_response(response, options)
+    def parse_json_tracking_response(response, options, request)
       parsed_response = JSON.parse(response)
       all_tracking_details = parsed_response.dig("output", "completeTrackResults")[0]
 
@@ -880,7 +880,7 @@ module ActiveShipping
         message,
         parsed_response,
         carrier: @@name,
-        request: '',
+        request: request,
         status: status,
         status_code: status_code,
         status_description: status_description,
