@@ -12,7 +12,7 @@ module ActiveShipping
 
     RESOURCES = {
       :rates => 'ups.app/xml/Rate',
-      :track => 'ups.app/xml/Track',
+      :track => 'api/ups.app/xml/Track',
       :ship_confirm => 'ups.app/xml/ShipConfirm',
       :ship_accept => 'ups.app/xml/ShipAccept',
       :delivery_dates =>  'ups.app/xml/TimeInTransit',
@@ -149,7 +149,7 @@ module ActiveShipping
     }
 
     def requirements
-      [:key, :login, :password]
+      [:client_id, :client_secret]
     end
 
     def find_rates(origin, destination, packages, options = {})
@@ -175,8 +175,43 @@ module ActiveShipping
       options = @options.merge(options)
       access_request = build_access_request
       tracking_request = build_tracking_request(tracking_number, options)
-      response = commit(:track, save_request(access_request + tracking_request), options[:test])
+      response = track_commit(:track, save_request(tracking_request), options[:test])
       parse_tracking_response(response, options)
+    end
+
+    def get_bearer_token(test = false)
+      combined_user_and_password = "#{@options[:client_id]}:#{@options[:client_secret]}"
+      uri = URI.parse("#{test ? TEST_URL : LIVE_URL}/#{'security/v1/oauth/token'}")
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = true
+
+      request = Net::HTTP::Post.new(uri.request_uri)
+      request['Content-Type'] = 'application/x-www-form-urlencoded'
+      request['x-merchant-id'] = 'string'
+      request['Authorization'] = "Basic #{Base64.strict_encode64(combined_user_and_password).strip}"
+      request.body = 'grant_type=client_credentials'
+
+      response = http.request(request)
+      if response.code == '200'
+        response_data = JSON.parse(response.body)
+        response_data['access_token']
+      else
+        error = "UPS Bearer token API response Error code #: #{response.code}"
+        Rails.logger.error(error)
+      end
+    end
+
+    def get_cached_bearer_token(test)
+      token = Rails.cache.read("ups-bearer-token") if !test
+      if token.nil?
+        token = get_bearer_token(test)
+        cache_ups_bearer_token(token) if token && !test
+      end
+      token
+    end
+
+    def cache_ups_bearer_token(token)
+      Rails.cache.write("ups-bearer-token", token, expires_in: 3.hours)
     end
 
     def create_shipment(origin, destination, packages, options = {})
@@ -1139,6 +1174,13 @@ module ActiveShipping
 
     def commit(action, request, test = false)
       response = ssl_post("#{test ? TEST_URL : LIVE_URL}/#{RESOURCES[action]}", request)
+      response.encode('utf-8', 'iso-8859-1')
+    end
+
+    def track_commit(action, request, test = false)
+      headers = {}
+      headers['Authorization'] = "Bearer #{get_cached_bearer_token(test)}"
+      response = ssl_post("#{test ? TEST_URL : LIVE_URL}/#{RESOURCES[action]}", request, headers)
       response.encode('utf-8', 'iso-8859-1')
     end
 
