@@ -453,9 +453,7 @@ module ActiveShipping
       headers['X-locale'] = 'en_US'
       headers['Content-Type'] = 'application/json'
       token = get_cached_bearer_token(options, test_mode)
-      binding.pry
       headers['authorization'] = "bearer #{token}"
-      binding.pry
       body = JSON.dump(build_tracking_request_body(tracking_number, options))
       return body, headers
     end
