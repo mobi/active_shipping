@@ -172,12 +172,12 @@ module ActiveShipping
 
     def find_tracking_info(tracking_number, options = {})
       options = @options.merge(options)
-      test = options[:mode] == "development"
+      test_mode = options[:mode] == "development"
       # tracking_request = build_tracking_request(tracking_number, options)
-      body, headers = build_json_tracking_request(tracking_number, options, test)
+      body, headers = build_json_tracking_request(tracking_number, options, test_mode)
       # xml = commit(save_request(tracking_request), (options[:test] || false))
       track_url = "/track/v1/trackingnumbers"
-      track_response = track_commit(body, headers, track_url, (test || false))
+      track_response = track_commit(body, headers, track_url, (test_mode || false))
       # parse_tracking_response(xml, options)
       parse_json_tracking_response(track_response, options, body)
     end
@@ -448,11 +448,14 @@ module ActiveShipping
       xml_builder.to_xml
     end
 
-    def build_json_tracking_request(tracking_number, options = {}, test)
+    def build_json_tracking_request(tracking_number, options = {}, test_mode)
       headers = {}
       headers['X-locale'] = 'en_US'
       headers['Content-Type'] = 'application/json'
-      headers['authorization'] = "bearer #{get_cached_bearer_token(options, test)}"
+      token = get_cached_bearer_token(options, test_mode)
+      binding.pry
+      headers['authorization'] = "bearer #{token}"
+      binding.pry
       body = JSON.dump(build_tracking_request_body(tracking_number, options))
       return body, headers
     end
@@ -475,26 +478,27 @@ module ActiveShipping
       return body
     end
 
-    def get_bearer_token(options, test)
+    def get_bearer_token(options, test_mode)
       begin
-        api_url = test ? TEST_URL : LIVE_URL
-        response = HTTParty.post("#{api_url}/#{'oauth/token'}", body: token_body(options))
+        api_url = test_mode ? TEST_URL : LIVE_URL
+        response = HTTParty.post("#{api_url}/oauth/token", body: token_body(options))
         case response.code
         when 200
           JSON.parse(response.body)['access_token']
         else
-          false
+          Rails.logger.error(response["errors"][0]["message"])
+          raise Exception.new(response["errors"][0]["message"])
         end
       rescue HTTParty::Error, SocketError, Timeout::Error => e
-        false
+        Rails.logger.error(e.message)
       end
     end
 
-    def get_cached_bearer_token(options, test)
-      token = Rails.cache.read("fedex-bearer-token") if !test
+    def get_cached_bearer_token(options, test_mode)
+      token = Rails.cache.read("fedex-bearer-token") if !test_mode
       if token.nil?
-        token = get_bearer_token(options, test)
-        create_bearer_token_cached(token) if token && !test
+        token = get_bearer_token(options, test_mode)
+        create_bearer_token_cached(token) if token && !test_mode
       end
       token
     end
@@ -923,8 +927,8 @@ module ActiveShipping
       ssl_post(test ? TEST_URL : LIVE_URL, request.gsub("\n", ''))
     end
 
-    def track_commit(data, headers, url, test = false)
-      ssl_post(test ? TEST_URL+url : LIVE_URL+url, data, headers)
+    def track_commit(data, headers, url, test_mode = false)
+      ssl_post(test_mode ? TEST_URL+url : LIVE_URL+url, data, headers)
     end
 
     def parse_transit_times(times)
