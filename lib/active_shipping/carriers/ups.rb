@@ -12,7 +12,7 @@ module ActiveShipping
 
     RESOURCES = {
       :rates => 'ups.app/xml/Rate',
-      :track => 'api/ups.app/xml/Track',
+      :track => 'api/track/v1/details/',
       :ship_confirm => 'ups.app/xml/ShipConfirm',
       :ship_accept => 'ups.app/xml/ShipAccept',
       :delivery_dates =>  'ups.app/xml/TimeInTransit',
@@ -173,9 +173,7 @@ module ActiveShipping
     #   response should a list of shipment tracking events if successful.
     def find_tracking_info(tracking_number, options = {})
       options = @options.merge(options)
-      access_request = build_access_request
-      tracking_request = build_tracking_request(tracking_number, options)
-      response = track_commit(:track, save_request(tracking_request), options[:test])
+      response = track_commit(:track, tracking_number, options[:test])
       parse_tracking_response(response, options)
     end
 
@@ -656,19 +654,14 @@ module ActiveShipping
       xml_builder.to_xml
     end
 
-    def build_tracking_request(tracking_number, options = {})
-      xml_builder = Nokogiri::XML::Builder.new do |xml|
-        xml.TrackRequest do
-          xml.TrackingOption(options[:tracking_option]) if options[:tracking_option]
-          xml.Request do
-            xml.RequestAction('Track')
-            xml.RequestOption('1')
-          end
-          xml.TrackingNumber(tracking_number.to_s)
-          xml.TrackingOption('03') if options[:mail_innovations]
-        end
-      end
-      xml_builder.to_xml
+    def build_tracking_request
+      query = {
+        locale: "en_US",
+        returnSignature: "false",
+        returnMilestones: "false",
+        returnPOD: "false"
+      }
+      query
     end
 
     def build_location_node(xml, name, location, options = {})
@@ -873,9 +866,10 @@ module ActiveShipping
     end
 
     def parse_tracking_response(response, options = {})
-      xml     = build_document(response, 'TrackResponse')
-      success = response_success?(xml)
-      message = response_message(xml)
+      parsed_response = JSON.parse(response)
+      #xml     = build_document(response, 'TrackResponse')
+      success = parsed_response.dig("trackResponse","shipment").present? #response_success?(xml)
+      message = " " #response_message(xml)
 
       if success
         delivery_signature = nil
@@ -883,51 +877,56 @@ module ActiveShipping
         delivered, exception = false
         shipment_events = []
 
-        first_shipment = xml.root.at('Shipment')
-        first_package = first_shipment.at('Package')
-        tracking_number = first_shipment.at_xpath('ShipmentIdentificationNumber | Package/TrackingNumber').text
+        first_shipment = parsed_response["trackResponse"]["shipment"] #first_shipment = xml.root.at('Shipment')
+        first_package = first_shipment.first["package"] #first_package = first_shipment.at('Package')
+        tracking_number = first_shipment.first["inquiryNumber"]
+        #tracking_number = first_shipment.at_xpath('ShipmentIdentificationNumber | Package/TrackingNumber').text
 
         # Build status hash
-        status_nodes = first_package.css('Activity > Status > StatusType')
+        status_nodes = first_package.first["activity"] #first_package.css('Activity > Status > StatusType')
 
         if status_nodes.present?
           # Prefer a delivery node
-          status_node = status_nodes.detect { |x| x.at('Code').text == 'D' }
-          status_node ||= status_nodes.first
+          status_node = status_nodes.detect { |x| x["status"]["type"] == 'D' }
+          status_node ||= status_nodes.last
 
-          status_code = status_node.at('Code').try(:text)
-          status_description = status_node.at('Description').try(:text)
+          status_code = status_node['status']['type']
+          status_description = status_node['status']['description']
           status = TRACKING_STATUS_CODES[status_code]
-
           if status_description =~ /out.*delivery/i
             status = :out_for_delivery
           end
         end
 
-        origin, destination = %w(Shipper ShipTo).map do |location|
-          location_from_address_node(first_shipment.at("#{location}/Address"))
-        end
+        # origin, destination = %w(Shipper ShipTo).map do |location|
+        #   location_from_address_node(first_shipment.at("#{location}/Address"))
+        # end
 
+        origin, destination = %w(ORIGIN DESTINATION).map do |type|
+          # addr = first_package.first["packageAddress"].detect { |x| x["type"] == type }
+          # return nil if addr.nil?
+          location_from_address_node(first_package.first["packageAddress"].detect { |x| x["type"] == type })
+        end
         # Get scheduled delivery date
         unless status == :delivered
-          scheduled_delivery_date_node = first_shipment.at('ScheduledDeliveryDate')
-          scheduled_delivery_date_node ||= first_shipment.at('RescheduledDeliveryDate')
+          scheduled_delivery_date_node = first_package.first["deliveryDate"].first #first_shipment.at('ScheduledDeliveryDate')
+          #scheduled_delivery_date_node ||= first_shipment.at('RescheduledDeliveryDate')
 
           if scheduled_delivery_date_node
             scheduled_delivery_date = parse_ups_datetime(
-              :date => scheduled_delivery_date_node,
+              :date => scheduled_delivery_date_node["date"],
               :time => nil
               )
           end
         end
 
-        activities = first_package.css('> Activity')
+        activities = first_package.first["activity"] #first_package.css('> Activity')
         unless activities.empty?
           shipment_events = activities.map do |activity|
-            description = activity.at('Status/StatusType/Description').try(:text)
-            type_code = activity.at('Status/StatusType/Code').try(:text)
-            zoneless_time = parse_ups_datetime(:time => activity.at('Time'), :date => activity.at('Date'))
-            location = location_from_address_node(activity.at('ActivityLocation/Address'))
+            description = activity['status']['description']
+            type_code = activity['status']['code']
+            zoneless_time = parse_ups_datetime(:time => activity['time'], :date => activity['date'])
+            location = location_from_address_node(activity['location'])
             ShipmentEvent.new(description, zoneless_time, location, description, type_code)
           end
 
@@ -949,10 +948,13 @@ module ActiveShipping
 
           # Has the shipment been delivered?
           if status == :delivered
-            delivered_activity = activities.first
-            delivery_signature = delivered_activity.at('ActivityLocation/SignedForByName').try(:text)
-            if delivered_activity.at('Status/StatusType/Code').text == 'D'
-              actual_delivery_date = parse_ups_datetime(:date => delivered_activity.at('Date'), :time => delivered_activity.at('Time'))
+            delivered_activity = activities.detect { |x| x["status"]["type"] == 'D' }
+            delivery_signature = first_package.first["deliveryInformation"]["receivedBy"]
+            delivery_date_node = first_package.first["deliveryDate"].detect { |x| x["type"] == 'DEL' }
+            if delivery_date_node.nil?
+              actual_delivery_date = parse_ups_datetime(:date => delivered_activity["date"], :time => delivered_activity["time"])
+            else delivery_date_node["type"] == 'DEL'
+              actual_delivery_date = parse_ups_datetime(:date => delivery_date_node["date"], :time => first_package.first["deliveryTime"]["endTime"])
             end
             unless destination
               destination = shipment_events[-1].location
@@ -962,7 +964,7 @@ module ActiveShipping
         end
 
       end
-      TrackingResponse.new(success, message, Hash.from_xml(response).values.first,
+      TrackingResponse.new(success, message, parsed_response,
                            :carrier => @@name,
                            :xml => response,
                            :request => last_request,
@@ -1109,22 +1111,24 @@ module ActiveShipping
 
     def location_from_address_node(address)
       return nil unless address
-      country = address.at('CountryCode').try(:text)
+      address = address["address"]
+      return nil unless address
+      country = address['countryCode']
       country = 'US' if country == 'ZZ' # Sometimes returned by SUREPOST in the US
       country = 'XK' if country == 'KV' # ActiveUtils now refers to Kosovo by XK
       Location.new(
         :country     => country,
-        :postal_code => address.at('PostalCode').try(:text),
-        :province    => address.at('StateProvinceCode').try(:text),
-        :city        => address.at('City').try(:text),
-        :address1    => address.at('AddressLine1').try(:text),
-        :address2    => address.at('AddressLine2').try(:text),
-        :address3    => address.at('AddressLine3').try(:text)
+        :postal_code => address['postalCode'],
+        :province    => address['stateProvince'],
+        :city        => address['city'],
+        :address1    => address['addressLine1'],
+        :address2    => address['addressLine2'],
+        :address3    => address['addressLine3']
       )
     end
 
     def parse_ups_datetime(options = {})
-      time, date = options[:time].try(:text), options[:date].text
+      time, date = options[:time], options[:date]
       if time.nil?
         hour, minute, second = 0
       else
@@ -1177,10 +1181,13 @@ module ActiveShipping
       response.encode('utf-8', 'iso-8859-1')
     end
 
-    def track_commit(action, request, test = false)
+    def track_commit(action, tracking_number, test = false)
       headers = {}
       headers['Authorization'] = "Bearer #{get_cached_bearer_token(test)}"
-      response = ssl_post("#{test ? TEST_URL : LIVE_URL}/#{RESOURCES[action]}", request, headers)
+      headers['transId'] = "678678err789"
+      headers['transactionSrc'] = 'testing'
+      query = build_tracking_request
+      response = ssl_get("#{test ? TEST_URL : LIVE_URL}/#{RESOURCES[action]}#{tracking_number}?#{URI.encode_www_form(query)}", headers)
       response.encode('utf-8', 'iso-8859-1')
     end
 
