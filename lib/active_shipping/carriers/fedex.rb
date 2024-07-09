@@ -10,8 +10,13 @@ module ActiveShipping
     cattr_reader :name
     @@name = "FedEx"
 
-    TEST_URL = 'https://gatewaybeta.fedex.com:443/xml'
-    LIVE_URL = 'https://gateway.fedex.com:443/xml'
+    # TEST_URL = 'https://gatewaybeta.fedex.com:443/xml'
+    # LIVE_URL = 'https://gateway.fedex.com:443/xml'
+
+    TEST_URL = 'https://apis-sandbox.fedex.com'
+    LIVE_URL = 'https://apis.fedex.com'
+
+
 
     CARRIER_CODES = {
       "fedex_ground" => "FDXG",
@@ -19,7 +24,10 @@ module ActiveShipping
     }
 
     DELIVERY_ADDRESS_NODE_NAMES = %w(DestinationAddress ActualDeliveryAddress)
+    DELIVERY_ADDRESS_NODE_NAMES_REST_API = %w(recipientInformation lastUpdatedDestinationAddress)
+
     SHIPPER_ADDRESS_NODE_NAMES  = %w(ShipperAddress)
+    SHIPPER_ADDRESS_NODE_NAMES_REST_API  = %w(shipperInformation)
 
     SERVICE_TYPES = {
       "PRIORITY_OVERNIGHT" => "FedEx Priority Overnight",
@@ -148,7 +156,7 @@ module ActiveShipping
     end
 
     def requirements
-      [:key, :password, :account, :login]
+      [:client_id, :client_secret]
     end
 
     def find_rates(origin, destination, packages, options = {})
@@ -164,10 +172,14 @@ module ActiveShipping
 
     def find_tracking_info(tracking_number, options = {})
       options = @options.merge(options)
-
-      tracking_request = build_tracking_request(tracking_number, options)
-      xml = commit(save_request(tracking_request), (options[:test] || false))
-      parse_tracking_response(xml, options)
+      test_mode = options[:mode] == "development"
+      # tracking_request = build_tracking_request(tracking_number, options)
+      body, headers = build_json_tracking_request(tracking_number, options, test_mode)
+      # xml = commit(save_request(tracking_request), (options[:test] || false))
+      track_url = "/track/v1/trackingnumbers"
+      track_response = track_commit(body, headers, track_url, (test_mode || false))
+      # parse_tracking_response(xml, options)
+      parse_json_tracking_response(track_response, options, body)
     end
 
 
@@ -434,6 +446,71 @@ module ActiveShipping
         end
       end
       xml_builder.to_xml
+    end
+
+    def build_json_tracking_request(tracking_number, options = {}, test_mode)
+      headers = {}
+      headers['X-locale'] = 'en_US'
+      headers['Content-Type'] = 'application/json'
+      token = get_cached_bearer_token(options, test_mode)
+      headers['authorization'] = "bearer #{token}"
+      body = JSON.dump(build_tracking_request_body(tracking_number, options))
+      return body, headers
+    end
+
+    def build_tracking_request_body(tracking_number, options)
+      track_number_body = {
+        'trackingNumber': tracking_number
+      }
+      track_number_body['trackingNumberUniqueId'] = options[:unique_identifier] if options[:unique_identifier]
+      body = {
+        'includeDetailedScans': true,
+        'trackingInfo': [
+          {
+            'trackingNumberInfo': track_number_body
+          }
+        ]
+      }
+      body['trackingInfo'][0]['shipDateBegin'] = options[:ship_date_range_begin] if options[:ship_date_range_begin]
+      body['trackingInfo'][0]['shipDateEnd'] = options[:ship_date_range_end] if options[:ship_date_range_end]
+      return body
+    end
+
+    def get_bearer_token(options, test_mode)
+      begin
+        api_url = test_mode ? TEST_URL : LIVE_URL
+        response = HTTParty.post("#{api_url}/oauth/token", body: token_body(options))
+        case response.code
+        when 200
+          JSON.parse(response.body)['access_token']
+        else
+          Rails.logger.error(response["errors"][0]["message"])
+          raise Exception.new(response["errors"][0]["message"])
+        end
+      rescue HTTParty::Error, SocketError, Timeout::Error => e
+        Rails.logger.error(e.message)
+      end
+    end
+
+    def get_cached_bearer_token(options, test_mode)
+      token = Rails.cache.read("fedex-bearer-token") if !test_mode
+      if token.nil?
+        token = get_bearer_token(options, test_mode)
+        create_bearer_token_cached(token) if token && !test_mode
+      end
+      token
+    end
+
+    def create_bearer_token_cached(token)
+      Rails.cache.write("fedex-bearer-token", token, expires_in: 45.minutes)
+    end
+
+    def token_body(options)
+      {
+        client_id: options[:client_id],
+        client_secret: options[:client_secret],
+        grant_type: 'client_credentials'
+      }
     end
 
     def build_request_header(xml)
@@ -713,6 +790,114 @@ module ActiveShipping
       )
     end
 
+    def parse_json_tracking_response(response, options, request)
+      parsed_response = JSON.parse(response)
+      all_tracking_details = parsed_response.dig("output", "completeTrackResults")[0]
+
+      success = true if all_tracking_details.present?
+      message = ''
+
+      if success
+        delivery_signature = nil
+        shipment_events = []
+
+        if all_tracking_details.dig("trackResults")[0].dig("error") != nil
+          message = all_tracking_details.dig("trackResults")[0].dig("error", "message")
+          return TrackingResponse.new(
+            false,
+            message,
+            parsed_response,
+            carrier: @@name
+          )
+        else
+          tracking_details = all_tracking_details.dig("trackResults")[0]
+        end
+        # first_notification = tracking_details.at('Notification')
+        # severity = first_notification.at('Severity').text
+        # if severity == 'ERROR' || severity == 'FAILURE'
+        #   message = first_notification.try(:text)
+        #   code = first_notification.at('Code').try(:text)
+        #   case code
+        #   when *TRANSIENT_TRACK_RESPONSE_CODES
+        #     raise ActiveShipping::ShipmentNotFound, first_notification.at('Message').text
+        #   else
+        #     raise ActiveShipping::ResponseContentError, StandardError.new(first_notification.at('Message').text)
+        #   end
+        # end
+
+        tracking_number = tracking_details.dig("trackingNumberInfo", "trackingNumber")
+        status_detail = tracking_details.dig("latestStatusDetail")
+
+        if status_detail.blank?
+          status_code, status, status_description, delivery_signature = nil
+        else
+          status_code = status_detail.dig("code")
+          status_description = status_detail.dig("ancillaryDetails")[0].dig("actionDescription") || status_detail.dig("description")
+
+          status = TRACKING_STATUS_CODES[status_code]
+
+          if status_code == 'DL' && tracking_details.dig("availableImages")[0]&.dig("type") == 'SIGNATURE_PROOF_OF_DELIVERY'
+            # delivery_signature = tracking_details.at('DeliverySignatureName').try(:text)
+          end
+        end
+
+        origin = if origin_node = tracking_details.dig('originLocation', 'locationContactAndAddress', 'address')
+          Location.new(
+            country: origin_node.dig('countryCode'),
+            province: origin_node.dig('stateOrProvinceCode'),
+            city: origin_node.dig('city')
+          )
+        end
+        destination = extract_track_address(tracking_details, DELIVERY_ADDRESS_NODE_NAMES_REST_API)
+        shipper_address = extract_track_address(tracking_details, SHIPPER_ADDRESS_NODE_NAMES_REST_API)
+
+        ship_time = extract_track_timestamp(tracking_details, 'SHIP')
+        actual_delivery_time = extract_track_timestamp(tracking_details, 'ACTUAL_DELIVERY')
+        scheduled_delivery_time = extract_track_timestamp(tracking_details, 'estimatedDeliveryTimeWindow')
+        tracking_details.dig('scanEvents').each do |event|
+          address  = event.dig('scanLocation')
+          next if address.nil? || address.dig('countryCode').nil?
+
+          city     = address.dig('city')
+          state    = address.dig('stateOrProvinceCode')
+          zip_code = address.dig('postalCode')
+          country  = address.dig('countryCode')
+
+          location = Location.new(:city => city, :state => state, :postal_code => zip_code, :country => country)
+          description = event.dig('eventDescription')
+          type_code = event.dig('eventType')
+
+          time          = Time.parse(event.dig('date'))
+          zoneless_time = time.utc
+
+          shipment_events << ShipmentEvent.new(description, zoneless_time, location, description, type_code)
+        end
+
+        shipment_events = shipment_events.sort_by(&:time)
+
+      end
+
+      TrackingResponse.new(
+        success,
+        message,
+        parsed_response,
+        carrier: @@name,
+        request: request,
+        status: status,
+        status_code: status_code,
+        status_description: status_description,
+        ship_time: ship_time,
+        scheduled_delivery_date: scheduled_delivery_time,
+        actual_delivery_date: actual_delivery_time,
+        delivery_signature: delivery_signature,
+        shipment_events: shipment_events,
+        shipper_address: (shipper_address.nil? || shipper_address.unknown?) ? nil : shipper_address,
+        origin: origin,
+        destination: destination,
+        tracking_number: tracking_number
+      )
+    end
+
     def ship_timestamp(delay_in_hours)
       delay_in_hours ||= 0
       Time.now + delay_in_hours.hours
@@ -738,6 +923,10 @@ module ActiveShipping
 
     def commit(request, test = false)
       ssl_post(test ? TEST_URL : LIVE_URL, request.gsub("\n", ''))
+    end
+
+    def track_commit(data, headers, url, test_mode = false)
+      ssl_post(test_mode ? TEST_URL+url : LIVE_URL+url, data, headers)
     end
 
     def parse_transit_times(times)
@@ -769,12 +958,51 @@ module ActiveShipping
       Location.new(args)
     end
 
+    def extract_track_address(document, possible_node_names)
+      node = nil
+      args = {}
+      possible_node_names.each do |name|
+        node = document.dig(name, 'address') if name == ('recipientInformation' || 'shipperInformation')
+        node = document.dig(name) if name == 'lastUpdatedDestinationAddress'
+        break if node
+      end
+
+      if node
+        args[:country] =
+        node.dig('countryCode') ||
+          ActiveUtils::Country.new(:alpha2 => 'ZZ', :name => 'Unknown or Invalid Territory', :alpha3 => 'ZZZ', :numeric => '999')
+
+        args[:province] = node.dig('stateOrProvinceCode') || 'unknown'
+        args[:city] = node.dig('city') || 'unknown'
+      end
+
+      Location.new(args)
+    end
+
     def extract_timestamp(document, node_name)
       if timestamp_node = document.at(node_name)
         if timestamp_node.text =~ /\A(\d{4}-\d{2}-\d{2})T00:00:00\Z/
           Date.parse($1)
         else
           Time.parse(timestamp_node.text)
+        end
+      end
+    end
+
+    def extract_track_timestamp(document, node_name)
+      if node_name == 'estimatedDeliveryTimeWindow'
+        timestamp_node = document.dig(node_name, 'window', 'ends')
+      else
+        document.dig('dateAndTimes').each do |doc|
+          timestamp_node = doc.dig('dateTime') if doc.dig('type') == node_name
+          break if timestamp_node
+        end
+      end
+      if timestamp_node
+        if timestamp_node =~ /\A(\d{4}-\d{2}-\d{2})T00:00:00\Z/
+          Date.parse($1)
+        else
+          Time.parse(timestamp_node)
         end
       end
     end
