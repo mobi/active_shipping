@@ -867,9 +867,8 @@ module ActiveShipping
 
     def parse_tracking_response(response, options = {})
       parsed_response = JSON.parse(response)
-      #xml     = build_document(response, 'TrackResponse')
-      success = parsed_response.dig("trackResponse","shipment").present? #response_success?(xml)
-      message = " " #response_message(xml)
+      success = parsed_response.dig("trackResponse","shipment").present?
+      message = " "
 
       if success
         delivery_signature = nil
@@ -877,13 +876,12 @@ module ActiveShipping
         delivered, exception = false
         shipment_events = []
 
-        first_shipment = parsed_response["trackResponse"]["shipment"] #first_shipment = xml.root.at('Shipment')
-        first_package = first_shipment.first["package"] #first_package = first_shipment.at('Package')
+        first_shipment = parsed_response["trackResponse"]["shipment"]
+        first_package = first_shipment.first["package"]
         tracking_number = first_shipment.first["inquiryNumber"]
-        #tracking_number = first_shipment.at_xpath('ShipmentIdentificationNumber | Package/TrackingNumber').text
 
         # Build status hash
-        status_nodes = first_package.first["activity"] #first_package.css('Activity > Status > StatusType')
+        status_nodes = first_package.first["activity"]
 
         if status_nodes.present?
           # Prefer a delivery node
@@ -898,19 +896,13 @@ module ActiveShipping
           end
         end
 
-        # origin, destination = %w(Shipper ShipTo).map do |location|
-        #   location_from_address_node(first_shipment.at("#{location}/Address"))
-        # end
-
         origin, destination = %w(ORIGIN DESTINATION).map do |type|
-          # addr = first_package.first["packageAddress"].detect { |x| x["type"] == type }
           # return nil if addr.nil?
           location_from_address_node(first_package.first["packageAddress"].detect { |x| x["type"] == type })
         end
         # Get scheduled delivery date
         unless status == :delivered
-          scheduled_delivery_date_node = first_package.first["deliveryDate"].first #first_shipment.at('ScheduledDeliveryDate')
-          #scheduled_delivery_date_node ||= first_shipment.at('RescheduledDeliveryDate')
+          scheduled_delivery_date_node = first_package.first["deliveryDate"].first
 
           if scheduled_delivery_date_node
             scheduled_delivery_date = parse_ups_datetime(
@@ -920,7 +912,7 @@ module ActiveShipping
           end
         end
 
-        activities = first_package.first["activity"] #first_package.css('> Activity')
+        activities = first_package.first["activity"]
         unless activities.empty?
           shipment_events = activities.map do |activity|
             description = activity['status']['description']
