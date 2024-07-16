@@ -1176,6 +1176,7 @@ module ActiveShipping
     def track_commit(action, tracking_number, test = false)
       headers = {}
       headers['Authorization'] = "Bearer #{get_cached_bearer_token(test)}"
+      # Below headers are hardcoded because its mondetry in API call and not getting used in the application
       headers['transId'] = "678678err789"
       headers['transactionSrc'] = 'testing'
       query = build_tracking_request
