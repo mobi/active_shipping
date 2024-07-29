@@ -832,7 +832,7 @@ module ActiveShipping
           status_code, status, status_description, delivery_signature = nil
         else
           status_code = status_detail.dig("code")
-          status_description = status_detail.dig("ancillaryDetails")[0].dig("actionDescription") || status_detail.dig("description")
+          status_description = status_detail.dig("ancillaryDetails") ? status_detail.dig("ancillaryDetails")[0].dig("actionDescription") : status_detail.dig("description")
 
           status = TRACKING_STATUS_CODES[status_code]
 
