@@ -4,6 +4,7 @@ sudo: false
 
 rvm:
 - "2.5.7"
+- "3.0.6"
 
 gemfile:
 - gemfiles/activesupport52.gemfile

@@ -1,5 +1,10 @@
 # ActiveShipping CHANGELOG
 
+### v3.0.0
+- Support ruby 3.0.6
+- `URI.encode` is deprecated -> using `URI.encode_www_form_component`
+- Support rails 7.0.7
+
 ### v2.1.1
 - Update README to clarify Shopify's involvement moving forward with v2.x
 
